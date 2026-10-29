@@ -104,7 +104,7 @@ index 57668b2..3a380bb 100644
  { win->vt->clip_request_paste(win, clipboard); }
  static inline void win_refresh(TermWin *win)
 diff --git a/terminal/terminal.c b/terminal/terminal.c
-index c2cb311..8ef3617 100644
+index c2cb311..4b8755d 100644
 --- a/terminal/terminal.c
 +++ b/terminal/terminal.c
 @@ -1575,6 +1575,7 @@ void term_update(Terminal *term)
@@ -146,22 +146,22 @@ index c2cb311..8ef3617 100644
 +#define OSC52_MAX_RAW (OSC52_MAX_B64 + 64)
 +
 +/*
-+ * Append a byte to the current OSC string. OSC 52 payloads go in a
-+ * separate growable buffer, and only if the feature is enabled.
++ * OSC 52 payloads are too long for osc_string, so they go in their own
++ * growable buffer, if the feature is enabled. Returns true if the byte
++ * was taken.
 + */
-+static void osc_append(Terminal *term, unsigned char c)
++static bool osc52_append(Terminal *term, unsigned char c)
 +{
-+    if (term->osc_type == OSCLIKE_OSC && term->esc_args[0] == 52 &&
-+        term->osc52_write) {
-+        if (!term->osc52_buf)
-+            term->osc52_buf = strbuf_new();
-+        if (term->osc52_buf->len < OSC52_MAX_RAW)
-+            put_byte(term->osc52_buf, c);
-+        else
-+            term->osc52_overflow = true;
-+    } else if (term->osc_strlen < OSC_STR_MAX) {
-+        term->osc_string[term->osc_strlen++] = (char)c;
-+    }
++    if (term->osc_type != OSCLIKE_OSC || term->esc_args[0] != 52 ||
++        term->osc52_write == OSC52_DENY)
++        return false;
++    if (!term->osc52_buf)
++        term->osc52_buf = strbuf_new();
++    if (term->osc52_buf->len < OSC52_MAX_RAW)
++        put_byte(term->osc52_buf, c);
++    else
++        term->osc52_overflow = true;
++    return true;
 +}
 +
 +#define OSC52_PREVIEW_CHARS 120
@@ -323,30 +323,28 @@ index c2cb311..8ef3617 100644
                      term->esc_args[0] = 0;
                      term->esc_nargs = 1;
                      break;
-@@ -5390,8 +5564,7 @@ static void term_out(Terminal *term, bool called_from_term_data)
+@@ -5390,6 +5564,8 @@ static void term_out(Terminal *term, bool called_from_term_data)
                  }
  
                  /* Anything else gets added to the string */
--                if (term->osc_strlen < OSC_STR_MAX)
--                    term->osc_string[term->osc_strlen++] = (char)c;
-+                osc_append(term, c);
++                if (osc52_append(term, c))
++                    break;
+                 if (term->osc_strlen < OSC_STR_MAX)
+                     term->osc_string[term->osc_strlen++] = (char)c;
                  break;
-               case OSC_MAYBE_ST_UTF8:
-                 /* In UTF-8 mode, we've seen C2, so are we now seeing
-@@ -5405,10 +5578,8 @@ static void term_out(Terminal *term, bool called_from_term_data)
+@@ -5405,6 +5581,11 @@ static void term_out(Terminal *term, bool called_from_term_data)
                  /* No, so append the pending C2 byte to the OSC string
                   * followed by the current character, and go back to
                   * OSC string accumulation */
--                if (term->osc_strlen < OSC_STR_MAX)
--                    term->osc_string[term->osc_strlen++] = 0xC2;
--                if (term->osc_strlen < OSC_STR_MAX)
--                    term->osc_string[term->osc_strlen++] = (char)c;
-+                osc_append(term, 0xC2);
-+                osc_append(term, c);
-                 term->termstate = OSC_STRING;
-                 break;
-               case SEEN_OSC_P: {
-@@ -7211,6 +7382,9 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
++                if (osc52_append(term, 0xC2)) {
++                    osc52_append(term, c);
++                    term->termstate = OSC_STRING;
++                    break;
++                }
+                 if (term->osc_strlen < OSC_STR_MAX)
+                     term->osc_string[term->osc_strlen++] = 0xC2;
+                 if (term->osc_strlen < OSC_STR_MAX)
+@@ -7211,6 +7392,9 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
                        !(term->mouse_override && shift));
      int default_seltype;
  
@@ -373,415 +371,6 @@ index e165a5b..f576f0e 100644
      char id_string[1024];
  
      unsigned char *tabs;
-diff --git a/test/fuzzterm.c b/test/fuzzterm.c
-index 9ebc893..bf46c57 100644
---- a/test/fuzzterm.c
-+++ b/test/fuzzterm.c
-@@ -80,6 +80,8 @@ static void fuzz_bell(TermWin *tw, int mode) {}
- static void fuzz_clip_write(
-     TermWin *tw, int clipboard, wchar_t *text, int *attrs,
-     truecolour *colours, int len, bool must_deselect) {}
-+static bool fuzz_confirm_clip_write(TermWin *tw, const char *msg)
-+{ return false; }
- static void fuzz_clip_request_paste(TermWin *tw, int clipboard) {}
- static void fuzz_refresh(TermWin *tw) {}
- static void fuzz_request_resize(TermWin *tw, int w, int h) {}
-@@ -107,6 +109,7 @@ static const TermWinVtable fuzz_termwin_vt = {
-     .set_scrollbar = fuzz_set_scrollbar,
-     .bell = fuzz_bell,
-     .clip_write = fuzz_clip_write,
-+    .confirm_clip_write = fuzz_confirm_clip_write,
-     .clip_request_paste = fuzz_clip_request_paste,
-     .refresh = fuzz_refresh,
-     .request_resize = fuzz_request_resize,
-diff --git a/test/test_conf.c b/test/test_conf.c
-index 33a25a4..b9df1b6 100644
---- a/test/test_conf.c
-+++ b/test/test_conf.c
-@@ -841,6 +841,7 @@ void test_simple(void)
-     test_bool_simple(CONF_utf8linedraw, "UTF8linedraw", false);
-     test_bool_simple(CONF_rtf_paste, "PasteRTF", false);
-     test_bool_simple(CONF_mouse_override, "MouseOverride", true);
-+    test_int_simple(CONF_osc52_write, "OSC52Write", OSC52_DENY);
-     test_bool_simple(CONF_mouseautocopy, "MouseAutocopy", CLIPUI_DEFAULT_AUTOCOPY);
-     test_int_translated(CONF_vtmode, "FontVTMode", VT_UNICODE,
-                         VT_XWINDOWS, 0,
-diff --git a/test/test_terminal.c b/test/test_terminal.c
-index 25ad906..6528ef7 100644
---- a/test/test_terminal.c
-+++ b/test/test_terminal.c
-@@ -12,6 +12,12 @@ void modalfatalbox(const char *p, ...)
-     exit(1);
- }
- 
-+#ifdef PLATFORM_IS_UTF16
-+#define SEL_NL_TEST_STR(a, b, c) a "\r\n" b "\r\n" c
-+#else
-+#define SEL_NL_TEST_STR(a, b, c) a "\n" b "\n" c
-+#endif
-+
- const char *const appname = "test_terminal";
- 
- char *platform_default_s(const char *name)
-@@ -33,6 +39,16 @@ typedef struct Mock {
-     struct unicode_data ucsdata[1];
-     strbuf *title;
- 
-+    /* Clipboard writes seen: count, clipboard id, and UTF-8 of last text */
-+    int nclip;
-+    int clip_id;
-+    strbuf *clip;
-+
-+    /* Confirmation prompts: count, canned answer, last message */
-+    int nconfirm;
-+    bool confirm_answer;
-+    strbuf *confirm_msg;
-+
-     strbuf *context;
- 
-     bool any_test_failed;
-@@ -52,6 +68,10 @@ static void mock_palette_set(TermWin *win, unsigned start, unsigned ncolours,
-                              const rgb *colours) {}
- static void mock_palette_get_overrides(TermWin *tw, Terminal *term) {}
- static void mock_set_title(TermWin *win, const char *title, int codepage);
-+static void mock_clip_write(
-+    TermWin *win, int clipboard, wchar_t *text, int *attrs,
-+    truecolour *colours, int len, bool deselect);
-+static bool mock_confirm_clip_write(TermWin *win, const char *msg);
- static void mock_set_icon_title(TermWin *win, const char *title, int cp) {}
- 
- static const TermWinVtable mock_termwin_vt = {
-@@ -60,6 +80,8 @@ static const TermWinVtable mock_termwin_vt = {
-     .draw_cursor = mock_draw_cursor,
-     .set_title = mock_set_title,
-     .set_icon_title = mock_set_icon_title,
-+    .clip_write = mock_clip_write,
-+    .confirm_clip_write = mock_confirm_clip_write,
-     .set_raw_mouse_mode = mock_set_raw_mouse_mode,
-     .set_raw_mouse_mode_pointer = mock_set_raw_mouse_mode_pointer,
-     .palette_set = mock_palette_set,
-@@ -79,6 +101,8 @@ static Mock *mock_new(void)
- 
-     mk->context = strbuf_new();
-     mk->title = strbuf_new();
-+    mk->clip = strbuf_new();
-+    mk->confirm_msg = strbuf_new();
- 
-     mk->tw.vt = &mock_termwin_vt;
- 
-@@ -91,6 +115,8 @@ static void mock_free(Mock *mk)
-     conf_free(mk->conf);
-     term_free(mk->term);
-     strbuf_free(mk->title);
-+    strbuf_free(mk->clip);
-+    strbuf_free(mk->confirm_msg);
-     sfree(mk);
- }
- 
-@@ -101,8 +127,38 @@ static void mock_set_title(TermWin *win, const char *title, int codepage)
-     put_dataz(mk->title, title);
- }
- 
-+static void mock_clip_write(
-+    TermWin *win, int clipboard, wchar_t *text, int *attrs,
-+    truecolour *colours, int len, bool deselect)
-+{
-+    Mock *mk = container_of(win, Mock, tw);
-+    mk->nclip++;
-+    mk->clip_id = clipboard;
-+    strbuf_clear(mk->clip);
-+    for (int i = 0; i < len; i++) {
-+        unsigned wc = text[i];
-+        if (sizeof(wchar_t) == 2 && wc >= 0xD800 && wc < 0xDC00 &&
-+            i+1 < len) {
-+            wc = 0x10000 + ((wc & 0x3FF) << 10) + (text[++i] & 0x3FF);
-+        }
-+        put_utf8_char(mk->clip, wc);
-+    }
-+}
-+
-+static bool mock_confirm_clip_write(TermWin *win, const char *msg)
-+{
-+    Mock *mk = container_of(win, Mock, tw);
-+    mk->nconfirm++;
-+    strbuf_clear(mk->confirm_msg);
-+    put_dataz(mk->confirm_msg, msg);
-+    return mk->confirm_answer;
-+}
-+
- static void reset(Mock *mk)
- {
-+    mk->nclip = 0;
-+    mk->nconfirm = 0;
-+    strbuf_clear(mk->clip);
-     term_pwron(mk->term, true);
-     term_size(mk->term, 24, 80, 0);
-     term_set_trust_status(mk->term, false);
-@@ -524,6 +580,225 @@ static void test_wintitle(Mock *mk)
-     SEQUAL(mk->title->s, "bar");
- }
- 
-+static void osc52_set(Mock *mk, int mode)
-+{
-+    conf_set_int(mk->conf, CONF_osc52_write, mode);
-+    term_reconfig(mk->term, mk->conf);
-+}
-+
-+static void osc52_send(Mock *mk, const char *prefix, const char *b64,
-+                       const char *term_str)
-+{
-+    char *s = dupcat("\033]52;", prefix, b64, term_str);
-+    term_data(mk->term, s, strlen(s));
-+    sfree(s);
-+}
-+
-+static void test_osc52(Mock *mk)
-+{
-+    mk->ucsdata->line_codepage = CP_UTF8;
-+
-+    /* Disabled by default */
-+    IEQUAL(conf_get_int(mk->conf, CONF_osc52_write), OSC52_DENY);
-+    reset(mk);
-+    osc52_send(mk, "c;", "aGVsbG8=", "\007");
-+    IEQUAL(mk->nclip, 0);
-+
-+    osc52_set(mk, OSC52_ALLOW);
-+
-+    /* BEL and ST terminators, and the assorted selection parameters */
-+    static const char *const sels[] = {
-+        "c;", "p;", "s;", "cp;", ";", "0;", "pc;", "c;" };
-+    for (size_t i = 0; i < lenof(sels); i++) {
-+        reset(mk);
-+        osc52_send(mk, sels[i], "aGVsbG8=", i % 2 ? "\033\\" : "\007");
-+        IEQUAL(mk->nclip, 1);
-+        IEQUAL(mk->clip_id, OSC52_CLIPBOARD);
-+        SEQUAL(mk->clip->s, "hello");
-+        /* Terminal state is back to normal afterwards */
-+        term_datapl(mk->term, PTRLEN_LITERAL("x"));
-+        IEQUAL(get_termchar(mk->term, 0, 0).chr, CSET_ASCII | 'x');
-+    }
-+
-+    /* C1 ST as UTF-8 */
-+    reset(mk);
-+    osc52_send(mk, "c;", "aGVsbG8=", "\xC2\x9C");
-+    SEQUAL(mk->clip->s, "hello");
-+
-+    /* Unicode: "h\xC3\xA9llo \xE2\x82\xAC \xF0\x9F\x98\x80" */
-+    reset(mk);
-+    osc52_send(mk, "c;", "aMOpbGxvIOKCrCDwn5iA", "\007");
-+    IEQUAL(mk->nclip, 1);
-+    SEQUAL(mk->clip->s, "h\xC3\xA9llo \xE2\x82\xAC \xF0\x9F\x98\x80");
-+
-+    /* Read queries are ignored, with no reply (no ldisc to reply to
-+     * either, so check nothing is written and the terminal survives) */
-+    reset(mk);
-+    osc52_send(mk, "c;", "?", "\007");
-+    osc52_send(mk, ";", "?", "\033\\");
-+    IEQUAL(mk->nclip, 0);
-+
-+    /* Malformed sequences */
-+    static const char *const bad_b64[] = {
-+        "aGVsbG8", "aGVs bG8=", "a*Vs", "=aGVsbG8", "aGVsbG8==", "====",
-+        "aGVsbG8=aGVsbG8=", "", "!" };
-+    for (size_t i = 0; i < lenof(bad_b64); i++) {
-+        reset(mk);
-+        osc52_send(mk, "c;", bad_b64[i], "\007");
-+        IEQUAL(mk->nclip, 0);
-+    }
-+    reset(mk);
-+    term_datapl(mk->term, PTRLEN_LITERAL("\033]52;aGVsbG8=\007")); /* no sel */
-+    term_datapl(mk->term, PTRLEN_LITERAL("\033]52\007"));
-+    term_datapl(mk->term, PTRLEN_LITERAL("\033]52;\007"));
-+    term_datapl(mk->term, PTRLEN_LITERAL("\033]52;c\007"));
-+    term_datapl(mk->term, PTRLEN_LITERAL("\033]52;c;\007"));
-+    term_datapl(mk->term, PTRLEN_LITERAL("\033]52;c d;aGVsbG8=\007"));
-+    IEQUAL(mk->nclip, 0);
-+
-+    /* Aborted by newline: no write, and the newline is processed */
-+    reset(mk);
-+    term_datapl(mk->term, PTRLEN_LITERAL("\033]52;c;aGVsbG8=\r\n"));
-+    IEQUAL(mk->nclip, 0);
-+    IEQUAL(mk->term->curs.y, 1);
-+
-+    /* Invalid UTF-8 and embedded NUL: rejected whole (/w== is 0xFF, 4oI= is
-+     * a truncated E2 82, AGE= is NUL 'a') */
-+    static const char *const bad_utf8[] = { "/w==", "4oI=", "AGE=", "gA==" };
-+    for (size_t i = 0; i < lenof(bad_utf8); i++) {
-+        reset(mk);
-+        osc52_send(mk, "c;", bad_utf8[i], "\007");
-+        IEQUAL(mk->nclip, 0);
-+    }
-+
-+    /* Size limits: exactly 100 KiB is accepted, one more byte is not,
-+     * and a payload far larger than that is discarded safely */
-+    for (int pass = 0; pass < 3; pass++) {
-+        size_t n = pass == 0 ? 102400 : pass == 1 ? 102401 : 1000000;
-+        strbuf *raw = strbuf_new();
-+        for (size_t i = 0; i < n; i++)
-+            put_byte(raw, 'a' + i % 26);
-+        strbuf *b64 = base64_encode_sb(ptrlen_from_strbuf(raw), 0);
-+        reset(mk);
-+        osc52_send(mk, "c;", b64->s, "\007");
-+        IEQUAL(mk->nclip, pass == 0 ? 1 : 0);
-+        if (pass == 0) {
-+            IEQUAL(mk->clip->len, 102400);
-+            IEQUAL(memcmp(mk->clip->s, raw->s, 102400), 0);
-+        }
-+        term_datapl(mk->term, PTRLEN_LITERAL("x"));
-+        IEQUAL(get_termchar(mk->term, 0, 0).chr, CSET_ASCII | 'x');
-+        strbuf_free(raw);
-+        strbuf_free(b64);
-+    }
-+
-+    /* Newlines are converted to the platform selection newline */
-+    reset(mk);
-+    osc52_send(mk, "c;", "YQpiDQpj", "\007");   /* a\nb\r\nc */
-+    IEQUAL(mk->nclip, 1);
-+    SEQUAL(mk->clip->s, SEL_NL_TEST_STR("a", "b", "c"));
-+
-+    /* Other OSC sequences are unaffected */
-+    reset(mk);
-+    term_datapl(mk->term, PTRLEN_LITERAL("\033]2;title\007"));
-+    term_update(mk->term);
-+    SEQUAL(mk->title->s, "title");
-+
-+    /* Disabling again turns writes off */
-+    osc52_set(mk, OSC52_DENY);
-+    reset(mk);
-+    osc52_send(mk, "c;", "aGVsbG8=", "\007");
-+    IEQUAL(mk->nclip, 0);
-+}
-+
-+static bool has_str(const char *hay, const char *needle)
-+{
-+    return strstr(hay, needle) != NULL;
-+}
-+
-+static void test_osc52_ask(Mock *mk)
-+{
-+    mk->ucsdata->line_codepage = CP_UTF8;
-+
-+    /* Ask + allow: prompted once, then written */
-+    osc52_set(mk, OSC52_ASK);
-+    mk->confirm_answer = true;
-+    reset(mk);
-+    osc52_send(mk, "c;", "aGVsbG8=", "\007");          /* hello */
-+    IEQUAL(mk->nconfirm, 1);
-+    IEQUAL(mk->nclip, 1);
-+    SEQUAL(mk->clip->s, "hello");
-+    IEQUAL(has_str(mk->confirm_msg->s, "5 bytes, 1 line"), true);
-+    IEQUAL(has_str(mk->confirm_msg->s, "hello"), true);
-+
-+    /* Allowed requests keep prompting each time */
-+    osc52_send(mk, "c;", "aGVsbG8=", "\007");
-+    IEQUAL(mk->nconfirm, 2);
-+    IEQUAL(mk->nclip, 2);
-+
-+    /* Ask + deny: nothing written, and further requests are not
-+     * prompted for until reconfiguration */
-+    osc52_set(mk, OSC52_ASK);
-+    mk->confirm_answer = false;
-+    reset(mk);
-+    osc52_send(mk, "c;", "aGVsbG8=", "\007");
-+    IEQUAL(mk->nconfirm, 1);
-+    IEQUAL(mk->nclip, 0);
-+    mk->confirm_answer = true;
-+    osc52_send(mk, "c;", "aGVsbG8=", "\007");
-+    IEQUAL(mk->nconfirm, 1);
-+    IEQUAL(mk->nclip, 0);
-+    osc52_set(mk, OSC52_ASK);                         /* resets the denial */
-+    osc52_send(mk, "c;", "aGVsbG8=", "\007");
-+    IEQUAL(mk->nconfirm, 2);
-+    IEQUAL(mk->nclip, 1);
-+
-+    /* Invalid or empty requests never reach the prompt */
-+    reset(mk);
-+    osc52_send(mk, "c;", "?", "\007");
-+    osc52_send(mk, "c;", "/w==", "\007");
-+    osc52_send(mk, "c;", "aGVsbG8", "\007");
-+    IEQUAL(mk->nconfirm, 0);
-+    IEQUAL(mk->nclip, 0);
-+
-+    /* Preview: line count, newlines flattened, controls and bidi
-+     * overrides defanged ("a\nb\x01\xE2\x80\xAEz\nc" ) */
-+    reset(mk);
-+    osc52_send(mk, "c;", "YQpiAeKArnoKYw==", "\007");
-+    IEQUAL(mk->nconfirm, 1);
-+    IEQUAL(has_str(mk->confirm_msg->s, "3 lines"), true);
-+    IEQUAL(has_str(mk->confirm_msg->s, "a b..z c"), true);
-+    IEQUAL(has_str(mk->confirm_msg->s, "\xE2\x80\xAE"), false);
-+    IEQUAL(has_str(mk->confirm_msg->s, "\x01"), false);
-+
-+    /* Long text: preview truncated, full text still written */
-+    {
-+        strbuf *raw = strbuf_new();
-+        for (size_t i = 0; i < 1000; i++)
-+            put_byte(raw, 'a' + i % 26);
-+        strbuf *b64 = base64_encode_sb(ptrlen_from_strbuf(raw), 0);
-+        reset(mk);
-+        osc52_send(mk, "c;", b64->s, "\007");
-+        IEQUAL(mk->nconfirm, 1);
-+        IEQUAL(mk->nclip, 1);
-+        IEQUAL(mk->clip->len, 1000);
-+        IEQUAL(has_str(mk->confirm_msg->s, "1000 bytes"), true);
-+        IEQUAL(has_str(mk->confirm_msg->s, "..."), true);
-+        IEQUAL(strlen(mk->confirm_msg->s) < 400, true);
-+        strbuf_free(raw);
-+        strbuf_free(b64);
-+    }
-+
-+    /* Allow never prompts */
-+    osc52_set(mk, OSC52_ALLOW);
-+    reset(mk);
-+    osc52_send(mk, "c;", "aGVsbG8=", "\007");
-+    IEQUAL(mk->nconfirm, 0);
-+    IEQUAL(mk->nclip, 1);
-+
-+    osc52_set(mk, OSC52_DENY);
-+}
-+
- int main(void)
- {
-     Mock *mk = mock_new();
-@@ -533,6 +808,8 @@ int main(void)
-     test_wrap(mk);
-     test_nonwrap(mk);
-     test_wintitle(mk);
-+    test_osc52(mk);
-+    test_osc52_ask(mk);
- 
-     bool failed = mk->any_test_failed;
-     mock_free(mk);
-diff --git a/unix/CMakeLists.txt b/unix/CMakeLists.txt
-index cd87470..153b662 100644
---- a/unix/CMakeLists.txt
-+++ b/unix/CMakeLists.txt
-@@ -231,15 +231,18 @@ if(GTK_FOUND)
-   target_link_libraries(test_lineedit
-     guiterminal settings eventloop utils ${platform_libraries})
- 
--  add_executable(test_terminal
--    ${CMAKE_SOURCE_DIR}/test/test_terminal.c
--    ${CMAKE_SOURCE_DIR}/stubs/no-gss.c
--    ${CMAKE_SOURCE_DIR}/stubs/no-storage.c
--    ${CMAKE_SOURCE_DIR}/stubs/no-timing.c)
--  target_link_libraries(test_terminal
--    guiterminal settings eventloop utils ${platform_libraries})
- endif()
- 
-+add_executable(test_terminal
-+  ${CMAKE_SOURCE_DIR}/test/test_terminal.c
-+  unicode.c
-+  ${CMAKE_SOURCE_DIR}/stubs/no-gss.c
-+  ${CMAKE_SOURCE_DIR}/stubs/no-printing.c
-+  ${CMAKE_SOURCE_DIR}/stubs/no-storage.c
-+  ${CMAKE_SOURCE_DIR}/stubs/no-timing.c)
-+target_link_libraries(test_terminal
-+  guiterminal settings eventloop utils ${platform_libraries})
-+
- # Pageant is built whether we have GTK or not; in its absence we
- # degrade to a version that doesn't provide the GTK askpass.
- if(GTK_FOUND)
 diff --git a/unix/platform.h b/unix/platform.h
 index a7efafd..ebd7453 100644
 --- a/unix/platform.h

@@ -59,9 +59,7 @@ copy after you resume work prompts again.
 
 ![Ask Dialog](0001-osc52-clipboard-write-ask-dialog.png)
 
-The GTK front end has no dialog yet: Ask acts as Deny there
-(`gtkwin_confirm_clip_write` returns false). Needs an async dialog
-via `unix/dialog.c`.
+The GTK (Unix) front end has no dialog yet: Ask acts as Deny there.
 
 ## What is supported
 
@@ -69,8 +67,8 @@ Write only:
 
     ESC ] 52 ; <selection> ; <base64 text> (BEL | ESC \ | C1 ST)
 
-- Text goes to the system clipboard on Windows, `CLIPBOARD` on Unix
-  (`OSC52_CLIPBOARD` in `windows/platform.h`, `unix/platform.h`).
+- Text goes to the system clipboard on Windows, and to the `CLIPBOARD`
+  selection on Unix.
 
 ## What is deliberately not possible
 
@@ -90,20 +88,6 @@ Write only:
 
 Newlines are converted to the platform selection newline (CRLF on
 Windows); `\r\n` in the input becomes one newline.
-
-## Where
-
-- `terminal/terminal.c`: `osc_append`, `osc52_prompt`, `do_osc52`; OSC 52
-  data is kept in its own growable buffer because `osc_string` is too small.
-- `putty.h`: `OSC52_*` modes and the `confirm_clip_write` TermWin method
-  (implemented in `windows/window.c`, `unix/window.c`, and the test and
-  fuzz mocks).
-- `conf.h`, `config.c`, `doc/config.but`, `windows/help.h`: option,
-  radio buttons, docs.
-- `test/test_terminal.c`: `test_osc52` (limits, malformed input,
-  terminators, newlines) and `test_osc52_ask` (prompt, allow, deny,
-  suppression, preview sanitising); `test/test_conf.c`: option
-  round-trip. `unix/CMakeLists.txt` builds `test_terminal` without GTK.
 
 ## Other implementations
 
