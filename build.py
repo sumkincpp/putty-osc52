@@ -175,6 +175,9 @@ class Builder:
         for f in files:
             log.info("copying %s to %s", f.name, self.out)
             shutil.copy(f, self.out)
+        # the binaries contain PuTTY code: its licence must travel with them
+        shutil.copy(ROOT / "LICENSE", self.out / "LICENSE")
+        shutil.copy(ROOT / "LICENSES" / "PuTTY.txt", self.out / "PuTTY-LICENSE.txt")
 
     def all(self) -> None:
         """build every program"""

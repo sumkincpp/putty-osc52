@@ -33,6 +33,9 @@ uv run build.py clean
 uv run build.py --help
 ```
 
+`putty` and `dist` also copy the licence files into `out/`; keep them with
+the binaries when you redistribute.
+
 Build trees go in `build/<platform>/`, so one checkout can be built from Linux and
 Windows (e.g. a shared folder). Both would also want their own venv: set
 `UV_PROJECT_ENVIRONMENT` on one of them to put it
@@ -58,3 +61,10 @@ git -C src diff --cached HEAD > patches/0001-osc52-clipboard-write.patch
 ```
 
 To bump PuTTY, change `PUTTY_REV` and run `uv run build.py resrc`.
+
+## License
+
+[MIT](LICENSE), Copyright (c) 2026 Fedor Vompe.
+
+PuTTY is copyright Simon Tatham and contributors, under its own MIT-style
+[licence](LICENSES/PuTTY.txt). This is an unofficial build.
