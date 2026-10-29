@@ -40,6 +40,11 @@ def main() -> None:
     if tool == "cc":
         # -UNDEBUG: zig cc defines NDEBUG when optimising; PuTTY refuses it
         target = os.environ.get("ZIG_TARGET", "x86_64-windows-gnu")
+        # -mwindows: CMake's GUI-exe flag, ignored by zig cc; use an lld
+        # subsystem option instead, else GUI exes get a console window
+        args = [
+            "-Wl,--subsystem,windows" if a == "-mwindows" else a for a in args
+        ]
         args = ["-target", target, "-UNDEBUG"] + args
     elif tool == "rc":
         args = rc_args(args)
