@@ -68,10 +68,10 @@ index 855dd67..f359af3 100644
  
  PuTTY has three user-interface actions which can be configured to
 diff --git a/putty.h b/putty.h
-index 57668b2..3a380bb 100644
+index 57668b2..8bfbef6 100644
 --- a/putty.h
 +++ b/putty.h
-@@ -295,6 +295,11 @@ struct unicode_data {
+@@ -295,6 +295,12 @@ struct unicode_data {
  #define LGXF_OVR  1                    /* existing logfile overwrite */
  #define LGXF_APN  0                    /* existing logfile append */
  #define LGXF_ASK -1                    /* existing logfile ask */
@@ -80,10 +80,11 @@ index 57668b2..3a380bb 100644
 +#define OSC52_DENY  0
 +#define OSC52_ASK    1
 +#define OSC52_ALLOW 2
++#define OSC52_MAX_DECODED 102400       /* default size limit, in bytes */
  #define LGTYP_NONE  0                  /* logmode: no logging */
  #define LGTYP_ASCII 1                  /* logmode: pure ascii */
  #define LGTYP_DEBUG 2                  /* logmode: all chars of traffic */
-@@ -1650,6 +1655,10 @@ struct TermWinVtable {
+@@ -1650,6 +1656,10 @@ struct TermWinVtable {
  
      void (*clip_write)(TermWin *, int clipboard, wchar_t *text, int *attrs,
                         truecolour *colours, int len, bool must_deselect);
@@ -94,7 +95,7 @@ index 57668b2..3a380bb 100644
      void (*clip_request_paste)(TermWin *, int clipboard);
  
      void (*refresh)(TermWin *);
-@@ -1733,6 +1742,8 @@ static inline void win_clip_write(
+@@ -1733,6 +1743,8 @@ static inline void win_clip_write(
      TermWin *win, int clipboard, wchar_t *text, int *attrs,
      truecolour *colours, int len, bool deselect)
  { win->vt->clip_write(win, clipboard, text, attrs, colours, len, deselect); }
@@ -104,7 +105,7 @@ index 57668b2..3a380bb 100644
  { win->vt->clip_request_paste(win, clipboard); }
  static inline void win_refresh(TermWin *win)
 diff --git a/terminal/terminal.c b/terminal/terminal.c
-index c2cb311..4b8755d 100644
+index c2cb311..22d2d10 100644
 --- a/terminal/terminal.c
 +++ b/terminal/terminal.c
 @@ -1575,6 +1575,7 @@ void term_update(Terminal *term)
@@ -124,7 +125,15 @@ index c2cb311..4b8755d 100644
      term->nethack_keypad = conf_get_bool(term->conf, CONF_nethack_keypad);
      term->no_alt_screen = conf_get_bool(term->conf, CONF_no_alt_screen);
      term->no_applic_c = conf_get_bool(term->conf, CONF_no_applic_c);
-@@ -2121,6 +2124,8 @@ void term_free(Terminal *term)
+@@ -2054,6 +2057,7 @@ Terminal *term_init(Conf *myconf, struct unicode_data *ucsdata, TermWin *win)
+     term = snew(Terminal);
+     memset(term, 0, sizeof(Terminal));
+     term->win = win;
++    term->osc52_max = OSC52_MAX_DECODED;
+     term->ucsdata = ucsdata;
+     term->conf = conf_copy(myconf);
+     term->compatibility_level = TM_PUTTY;
+@@ -2121,6 +2125,8 @@ void term_free(Terminal *term)
              freetermline(term->disptext[i]);
      }
      sfree(term->disptext);
@@ -133,17 +142,17 @@ index c2cb311..4b8755d 100644
      while (term->beephead) {
          beep = term->beephead;
          term->beephead = beep->next;
-@@ -3185,6 +3190,169 @@ static void toggle_mode(Terminal *term, int mode, int query, bool state)
+@@ -3185,6 +3191,169 @@ static void toggle_mode(Terminal *term, int mode, int query, bool state)
      }
  }
  
 +/*
-+ * OSC 52 limits: 100 KiB of decoded text, which is 136536 characters
-+ * of Base64, plus room for the selection parameter.
++ * OSC 52 size limit (term->osc52_max, 100 KiB of decoded text by default).
++ * That many bytes are 136536 characters of Base64; the raw string also
++ * has room for the selection parameter.
 + */
-+#define OSC52_MAX_DECODED 102400
-+#define OSC52_MAX_B64 (((OSC52_MAX_DECODED + 2) / 3) * 4)
-+#define OSC52_MAX_RAW (OSC52_MAX_B64 + 64)
++#define OSC52_MAX_B64(n) ((((n) + 2) / 3) * 4)
++#define OSC52_MAX_RAW(n) (OSC52_MAX_B64(n) + 64)
 +
 +/*
 + * OSC 52 payloads are too long for osc_string, so they go in their own
@@ -157,7 +166,7 @@ index c2cb311..4b8755d 100644
 +        return false;
 +    if (!term->osc52_buf)
 +        term->osc52_buf = strbuf_new();
-+    if (term->osc52_buf->len < OSC52_MAX_RAW)
++    if (term->osc52_buf->len < OSC52_MAX_RAW(term->osc52_max))
 +        put_byte(term->osc52_buf, c);
 +    else
 +        term->osc52_overflow = true;
@@ -233,7 +242,7 @@ index c2cb311..4b8755d 100644
 +            return;
 +
 +    ptrlen b64 = make_ptrlen(semi + 1, all.len - (semi + 1 - (const char *)all.ptr));
-+    if (b64.len == 0 || b64.len > OSC52_MAX_B64)
++    if (b64.len == 0 || b64.len > OSC52_MAX_B64(term->osc52_max))
 +        return;
 +    if (b64.len == 1 && *(const char *)b64.ptr == '?')
 +        return;                        /* clipboard read: never answered */
@@ -241,7 +250,7 @@ index c2cb311..4b8755d 100644
 +        return;
 +
 +    strbuf *dec = base64_decode_sb(b64);
-+    if (dec->len > OSC52_MAX_DECODED || dec->len == 0) {
++    if (dec->len > term->osc52_max || dec->len == 0) {
 +        strbuf_free(dec);
 +        return;
 +    }
@@ -303,7 +312,7 @@ index c2cb311..4b8755d 100644
  /*
   * Process an OSC or similar sequence, with a whole embedded string,
   * like setting the window title or icon name.
-@@ -3222,6 +3390,9 @@ static void do_osc(Terminal *term)
+@@ -3222,6 +3391,9 @@ static void do_osc(Terminal *term)
                  term_schedule_update(term);
              }
              break;
@@ -313,7 +322,7 @@ index c2cb311..4b8755d 100644
            case 4:
              if (term->ldisc && !strcmp(term->osc_string, "?")) {
                  unsigned index = term->esc_args[1];
-@@ -4126,6 +4297,9 @@ static void term_out(Terminal *term, bool called_from_term_data)
+@@ -4126,6 +4298,9 @@ static void term_out(Terminal *term, bool called_from_term_data)
                      term->termstate = SEEN_OSC;
                      term->osc_type = OSCLIKE_OSC;
                      term->osc_strlen = 0;
@@ -323,7 +332,7 @@ index c2cb311..4b8755d 100644
                      term->esc_args[0] = 0;
                      term->esc_nargs = 1;
                      break;
-@@ -5390,6 +5564,8 @@ static void term_out(Terminal *term, bool called_from_term_data)
+@@ -5390,6 +5565,8 @@ static void term_out(Terminal *term, bool called_from_term_data)
                  }
  
                  /* Anything else gets added to the string */
@@ -332,7 +341,7 @@ index c2cb311..4b8755d 100644
                  if (term->osc_strlen < OSC_STR_MAX)
                      term->osc_string[term->osc_strlen++] = (char)c;
                  break;
-@@ -5405,6 +5581,11 @@ static void term_out(Terminal *term, bool called_from_term_data)
+@@ -5405,6 +5582,11 @@ static void term_out(Terminal *term, bool called_from_term_data)
                  /* No, so append the pending C2 byte to the OSC string
                   * followed by the current character, and go back to
                   * OSC string accumulation */
@@ -344,7 +353,7 @@ index c2cb311..4b8755d 100644
                  if (term->osc_strlen < OSC_STR_MAX)
                      term->osc_string[term->osc_strlen++] = 0xC2;
                  if (term->osc_strlen < OSC_STR_MAX)
-@@ -7211,6 +7392,9 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
+@@ -7211,6 +7393,9 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
                        !(term->mouse_override && shift));
      int default_seltype;
  
@@ -355,10 +364,10 @@ index c2cb311..4b8755d 100644
      // Note: return early to avoid doing all of this code on every mouse move
      // event only to throw it away.
 diff --git a/terminal/terminal.h b/terminal/terminal.h
-index e165a5b..f576f0e 100644
+index e165a5b..508f392 100644
 --- a/terminal/terminal.h
 +++ b/terminal/terminal.h
-@@ -194,6 +194,12 @@ struct terminal_tag {
+@@ -194,6 +194,15 @@ struct terminal_tag {
      int osc_strlen;
      char osc_string[OSC_STR_MAX + 1];
  
@@ -367,6 +376,9 @@ index e165a5b..f576f0e 100644
 +    bool osc52_denied;                 /* user said no; stop asking */
 +    bool osc52_overflow;
 +    strbuf *osc52_buf;
++    /* Largest accepted request, in decoded bytes. A field and not just a
++     * constant so that tests can lower it and use tiny payloads */
++    size_t osc52_max;
 +
      char id_string[1024];
  
