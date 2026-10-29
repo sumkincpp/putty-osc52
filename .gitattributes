@@ -1,0 +1,2 @@
+*.patch -text
+PUTTY_REV text eol=lf

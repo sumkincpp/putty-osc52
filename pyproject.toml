@@ -1,0 +1,20 @@
+[project]
+name = "putty-toolchain"
+version = "0"
+requires-python = ">=3.9"
+dependencies = [
+    # ziglang 0.17 does not have pre-built wheels for Windows ;(
+    "ziglang>=0.16,<0.17; sys_platform == 'win32'",
+    "ziglang>=0.17,<0.18; sys_platform != 'win32'",
+    "cmake",
+    "ninja",
+]
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.ruff]
+line-length = 160
