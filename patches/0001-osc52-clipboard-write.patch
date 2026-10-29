@@ -105,7 +105,7 @@ index 57668b2..8bfbef6 100644
  { win->vt->clip_request_paste(win, clipboard); }
  static inline void win_refresh(TermWin *win)
 diff --git a/terminal/terminal.c b/terminal/terminal.c
-index c2cb311..22d2d10 100644
+index c2cb311..fa8ae3d 100644
 --- a/terminal/terminal.c
 +++ b/terminal/terminal.c
 @@ -1575,6 +1575,7 @@ void term_update(Terminal *term)
@@ -142,7 +142,7 @@ index c2cb311..22d2d10 100644
      while (term->beephead) {
          beep = term->beephead;
          term->beephead = beep->next;
-@@ -3185,6 +3191,169 @@ static void toggle_mode(Terminal *term, int mode, int query, bool state)
+@@ -3185,6 +3191,35 @@ static void toggle_mode(Terminal *term, int mode, int query, bool state)
      }
  }
  
@@ -173,6 +173,56 @@ index c2cb311..22d2d10 100644
 +    return true;
 +}
 +
++static void do_osc52(Terminal *term);   /* below, with the clipboard code */
++
+ /*
+  * Process an OSC or similar sequence, with a whole embedded string,
+  * like setting the window title or icon name.
+@@ -3222,6 +3257,9 @@ static void do_osc(Terminal *term)
+                 term_schedule_update(term);
+             }
+             break;
++          case 52:
++            do_osc52(term);
++            break;
+           case 4:
+             if (term->ldisc && !strcmp(term->osc_string, "?")) {
+                 unsigned index = term->esc_args[1];
+@@ -4126,6 +4164,9 @@ static void term_out(Terminal *term, bool called_from_term_data)
+                     term->termstate = SEEN_OSC;
+                     term->osc_type = OSCLIKE_OSC;
+                     term->osc_strlen = 0;
++                    term->osc52_overflow = false;
++                    if (term->osc52_buf)
++                        strbuf_clear(term->osc52_buf);
+                     term->esc_args[0] = 0;
+                     term->esc_nargs = 1;
+                     break;
+@@ -5390,6 +5431,8 @@ static void term_out(Terminal *term, bool called_from_term_data)
+                 }
+ 
+                 /* Anything else gets added to the string */
++                if (osc52_append(term, c))
++                    break;
+                 if (term->osc_strlen < OSC_STR_MAX)
+                     term->osc_string[term->osc_strlen++] = (char)c;
+                 break;
+@@ -5405,6 +5448,11 @@ static void term_out(Terminal *term, bool called_from_term_data)
+                 /* No, so append the pending C2 byte to the OSC string
+                  * followed by the current character, and go back to
+                  * OSC string accumulation */
++                if (osc52_append(term, 0xC2)) {
++                    osc52_append(term, c);
++                    term->termstate = OSC_STRING;
++                    break;
++                }
+                 if (term->osc_strlen < OSC_STR_MAX)
+                     term->osc_string[term->osc_strlen++] = 0xC2;
+                 if (term->osc_strlen < OSC_STR_MAX)
+@@ -6618,6 +6666,167 @@ static void clip_addchar(clip_workbuf *b, wchar_t chr, int attr, truecolour tc)
+     b->bufpos++;
+ }
+ 
 +#define OSC52_PREVIEW_CHARS 120
 +
 +/*
@@ -182,9 +232,10 @@ index c2cb311..22d2d10 100644
 + */
 +static char *osc52_prompt(ptrlen data)
 +{
-+    size_t lines = 1;
++    const char *text = data.ptr;
++    size_t lines = 1;                  /* one more than the number of newlines */
 +    for (size_t i = 0; i < data.len; i++)
-+        if (((const char *)data.ptr)[i] == '\n')
++        if (text[i] == '\n')
 +            lines++;
 +
 +    strbuf *pv = strbuf_new();
@@ -199,12 +250,16 @@ index c2cb311..22d2d10 100644
 +            truncated = true;
 +            break;
 +        }
++        /* Line breaks and tabs become spaces, so the preview is one line */
 +        if (cp == '\n' || cp == '\r' || cp == '\t')
 +            cp = ' ';
-+        else if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0) ||
-+                 (cp >= 0x200b && cp <= 0x200f) ||
-+                 (cp >= 0x202a && cp <= 0x202e) ||
-+                 (cp >= 0x2066 && cp <= 0x2069) || cp == 0xfeff)
++        /* Other control characters, and characters that invisibly change
++         * how text is drawn, are shown as '.' so they can't disguise it */
++        else if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0) ||   /* C0, DEL, C1 */
++                 (cp >= 0x200b && cp <= 0x200f) ||   /* zero-width, LRM, RLM */
++                 (cp >= 0x202a && cp <= 0x202e) ||   /* embeddings, overrides */
++                 (cp >= 0x2066 && cp <= 0x2069) ||   /* isolates */
++                 cp == 0xfeff)                       /* zero-width no-break space */
 +            cp = '.';
 +        put_utf8_char(pv, cp);
 +        shown++;
@@ -221,139 +276,118 @@ index c2cb311..22d2d10 100644
 +}
 +
 +/*
-+ * OSC 52 ; selection ; data. Write-only: queries ("?") are ignored
-+ * without a reply, and anything malformed is silently dropped.
++ * Add OSC 52 text to buf: UTF-8 decoded to wchar_t, with newlines changed
++ * to the selection newline and with plain attributes, as clipme does for
++ * text that has no formatting. False if it is not valid UTF-8 or has a NUL.
 + */
-+static void do_osc52(Terminal *term)
++static bool osc52_text(Terminal *term, ptrlen utf8, clip_workbuf *buf)
 +{
-+    if (term->osc52_write == OSC52_DENY || !term->osc52_buf ||
-+        term->osc52_overflow ||
-+        (term->osc52_write == OSC52_ASK && term->osc52_denied))
-+        return;
-+
-+    ptrlen all = ptrlen_from_strbuf(term->osc52_buf);
-+    const char *semi = memchr(all.ptr, ';', all.len);
-+    if (!semi)
-+        return;                        /* no selection/payload split */
-+
-+    /* Selection parameter must be letters/digits; its value is ignored */
-+    for (const char *p = all.ptr; p < semi; p++)
-+        if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9')))
-+            return;
-+
-+    ptrlen b64 = make_ptrlen(semi + 1, all.len - (semi + 1 - (const char *)all.ptr));
-+    if (b64.len == 0 || b64.len > OSC52_MAX_B64(term->osc52_max))
-+        return;
-+    if (b64.len == 1 && *(const char *)b64.ptr == '?')
-+        return;                        /* clipboard read: never answered */
-+    if (b64.len % 4 != 0 || !base64_valid(b64))
-+        return;
-+
-+    strbuf *dec = base64_decode_sb(b64);
-+    if (dec->len > term->osc52_max || dec->len == 0) {
-+        strbuf_free(dec);
-+        return;
-+    }
-+
-+    /* Worst case: every byte is a newline expanded to sel_nl_sz */
-+    size_t maxlen = dec->len * (sel_nl_sz > 1 ? sel_nl_sz : 1) + 1;
-+    wchar_t *text = snewn(maxlen, wchar_t);
-+    size_t n = 0;
-+    bool ok = true;
++    truecolour tc = term->basic_erase_char.truecolour;
 +    BinarySource src[1];
-+    BinarySource_BARE_INIT_PL(src, ptrlen_from_strbuf(dec));
++    BinarySource_BARE_INIT_PL(src, utf8);
++
 +    while (get_avail(src)) {
 +        DecodeUTF8Failure err;
 +        wchar_t wc[2];
 +        size_t nw = decode_utf8_to_wchar(src, wc, &err);
-+        if (err != DUTF8_SUCCESS || wc[0] == 0) {
-+            ok = false;                /* invalid UTF-8 or embedded NUL */
-+            break;
-+        }
++        if (err != DUTF8_SUCCESS || wc[0] == 0)
++            return false;
++        if (wc[0] == '\r' && get_avail(src) &&
++            *(const char *)get_ptr(src) == '\n')
++            continue;                  /* CRLF -> one newline */
 +        if (nw == 1 && wc[0] == '\n') {
-+            if (n > 0 && text[n-1] == '\r')
-+                n--;                   /* CRLF -> one newline */
 +            for (size_t i = 0; i < sel_nl_sz; i++)
-+                text[n++] = sel_nl[i];
++                clip_addchar(buf, sel_nl[i], 0, tc);
 +        } else {
 +            for (size_t i = 0; i < nw; i++)
-+                text[n++] = wc[i];
++                clip_addchar(buf, wc[i], 0, tc);
 +        }
 +    }
-+    char *prompt = NULL;
-+    if (ok && n > 0 && term->osc52_write == OSC52_ASK)
-+        prompt = osc52_prompt(ptrlen_from_strbuf(dec));
-+    strbuf_free(dec);
-+
-+    if (ok && n > 0) {
-+        bool allow = true;
-+        if (prompt) {
-+            allow = win_confirm_clip_write(term->win, prompt);
-+            if (!allow)
-+                term->osc52_denied = true;   /* don't let the host nag */
-+        }
-+        if (allow) {
-+            int *attrs = snewn(n, int);
-+            truecolour *tcs = snewn(n, truecolour);
-+            for (size_t i = 0; i < n; i++) {
-+                attrs[i] = 0;
-+                tcs[i] = term->basic_erase_char.truecolour;
-+            }
-+            win_clip_write(term->win, OSC52_CLIPBOARD, text, attrs, tcs, n,
-+                           false);
-+            sfree(attrs);
-+            sfree(tcs);
-+        }
-+    }
-+    sfree(prompt);
-+    sfree(text);
++    return true;
 +}
 +
- /*
-  * Process an OSC or similar sequence, with a whole embedded string,
-  * like setting the window title or icon name.
-@@ -3222,6 +3391,9 @@ static void do_osc(Terminal *term)
-                 term_schedule_update(term);
-             }
-             break;
-+          case 52:
-+            do_osc52(term);
-+            break;
-           case 4:
-             if (term->ldisc && !strcmp(term->osc_string, "?")) {
-                 unsigned index = term->esc_args[1];
-@@ -4126,6 +4298,9 @@ static void term_out(Terminal *term, bool called_from_term_data)
-                     term->termstate = SEEN_OSC;
-                     term->osc_type = OSCLIKE_OSC;
-                     term->osc_strlen = 0;
-+                    term->osc52_overflow = false;
-+                    if (term->osc52_buf)
-+                        strbuf_clear(term->osc52_buf);
-                     term->esc_args[0] = 0;
-                     term->esc_nargs = 1;
-                     break;
-@@ -5390,6 +5565,8 @@ static void term_out(Terminal *term, bool called_from_term_data)
-                 }
- 
-                 /* Anything else gets added to the string */
-+                if (osc52_append(term, c))
-+                    break;
-                 if (term->osc_strlen < OSC_STR_MAX)
-                     term->osc_string[term->osc_strlen++] = (char)c;
-                 break;
-@@ -5405,6 +5582,11 @@ static void term_out(Terminal *term, bool called_from_term_data)
-                 /* No, so append the pending C2 byte to the OSC string
-                  * followed by the current character, and go back to
-                  * OSC string accumulation */
-+                if (osc52_append(term, 0xC2)) {
-+                    osc52_append(term, c);
-+                    term->termstate = OSC_STRING;
-+                    break;
-+                }
-                 if (term->osc_strlen < OSC_STR_MAX)
-                     term->osc_string[term->osc_strlen++] = 0xC2;
-                 if (term->osc_strlen < OSC_STR_MAX)
-@@ -7211,6 +7393,9 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
++/*
++ * The decoded text of the OSC 52 request in term->osc52_buf, or NULL if
++ * the request is not allowed or not valid. Queries ("?") are ignored
++ * without a reply, and anything malformed is silently dropped.
++ */
++static strbuf *osc52_decode(Terminal *term)
++{
++    if (term->osc52_write == OSC52_DENY || !term->osc52_buf ||
++        term->osc52_overflow ||
++        (term->osc52_write == OSC52_ASK && term->osc52_denied))
++        return NULL;
++
++    ptrlen all = ptrlen_from_strbuf(term->osc52_buf);
++    const char *semi = memchr(all.ptr, ';', all.len);
++    if (!semi)
++        return NULL;                   /* no selection/payload split */
++
++    ptrlen sel = make_ptrlen_startend(all.ptr, semi);
++    ptrlen b64 = make_ptrlen_startend(semi + 1, ptrlen_end(all));
++
++    /* Selection parameter must be letters/digits; its value is ignored */
++    if (!ptrlen_contains_only(sel, "abcdefghijklmnopqrstuvwxyz0123456789"))
++        return NULL;
++    if (b64.len == 0 || b64.len > OSC52_MAX_B64(term->osc52_max))
++        return NULL;
++    if (ptrlen_eq_string(b64, "?"))
++        return NULL;                   /* clipboard read: never answered */
++    if (b64.len % 4 != 0 || !base64_valid(b64))
++        return NULL;
++
++    strbuf *dec = base64_decode_sb(b64);
++    if (dec->len == 0 || dec->len > term->osc52_max) {
++        strbuf_free(dec);
++        return NULL;
++    }
++    return dec;
++}
++
++/*
++ * OSC 52 ; selection ; data. Write-only: puts the text on the clipboard,
++ * after asking the user first if the setting says so.
++ */
++static void do_osc52(Terminal *term)
++{
++    strbuf *dec = osc52_decode(term);
++    if (!dec)
++        return;
++
++    /*
++     * Unlike clipme's, this buffer starts empty (all zero) and gets its
++     * space on the first clip_addchar.
++     */
++    clip_workbuf buf;
++    memset(&buf, 0, sizeof(buf));
++    char *prompt = NULL;
++
++    if (osc52_text(term, ptrlen_from_strbuf(dec), &buf)) {
++        if (term->osc52_write == OSC52_ASK)
++            prompt = osc52_prompt(ptrlen_from_strbuf(dec));
++
++        if (prompt && !win_confirm_clip_write(term->win, prompt)) {
++            term->osc52_denied = true; /* don't let the host nag */
++        } else {
++#if SELECTION_NUL_TERMINATED
++            clip_addchar(&buf, 0, 0, term->basic_erase_char.truecolour);
++#endif
++            win_clip_write(term->win, OSC52_CLIPBOARD, buf.textbuf,
++                           buf.attrbuf, buf.tcbuf, buf.bufpos, false);
++        }
++    }
++
++    strbuf_free(dec);
++    sfree(prompt);
++    sfree(buf.textbuf);
++    sfree(buf.attrbuf);
++    sfree(buf.tcbuf);
++}
++
+ static void clipme(Terminal *term, pos top, pos bottom, bool rect, bool desel,
+                    const int *clipboards, int n_clipboards)
+ {
+@@ -7211,6 +7420,9 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
                        !(term->mouse_override && shift));
      int default_seltype;
  
