@@ -105,7 +105,7 @@ index 57668b2..8bfbef6 100644
  { win->vt->clip_request_paste(win, clipboard); }
  static inline void win_refresh(TermWin *win)
 diff --git a/terminal/terminal.c b/terminal/terminal.c
-index c2cb311..fa8ae3d 100644
+index c2cb311..c576069 100644
 --- a/terminal/terminal.c
 +++ b/terminal/terminal.c
 @@ -1575,6 +1575,7 @@ void term_update(Terminal *term)
@@ -219,7 +219,7 @@ index c2cb311..fa8ae3d 100644
                  if (term->osc_strlen < OSC_STR_MAX)
                      term->osc_string[term->osc_strlen++] = 0xC2;
                  if (term->osc_strlen < OSC_STR_MAX)
-@@ -6618,6 +6666,167 @@ static void clip_addchar(clip_workbuf *b, wchar_t chr, int attr, truecolour tc)
+@@ -6618,6 +6666,169 @@ static void clip_addchar(clip_workbuf *b, wchar_t chr, int attr, truecolour tc)
      b->bufpos++;
  }
  
@@ -313,10 +313,12 @@ index c2cb311..fa8ae3d 100644
 + */
 +static strbuf *osc52_decode(Terminal *term)
 +{
-+    if (term->osc52_write == OSC52_DENY || !term->osc52_buf ||
-+        term->osc52_overflow ||
-+        (term->osc52_write == OSC52_ASK && term->osc52_denied))
-+        return NULL;
++    if (term->osc52_write == OSC52_DENY)
++        return NULL;                   /* the feature is off */
++    if (!term->osc52_buf || term->osc52_overflow)
++        return NULL;                   /* nothing collected, or too long */
++    if (term->osc52_write == OSC52_ASK && term->osc52_denied)
++        return NULL;                   /* the user refused; don't ask again */
 +
 +    ptrlen all = ptrlen_from_strbuf(term->osc52_buf);
 +    const char *semi = memchr(all.ptr, ';', all.len);
@@ -387,7 +389,7 @@ index c2cb311..fa8ae3d 100644
  static void clipme(Terminal *term, pos top, pos bottom, bool rect, bool desel,
                     const int *clipboards, int n_clipboards)
  {
-@@ -7211,6 +7420,9 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
+@@ -7211,6 +7422,9 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
                        !(term->mouse_override && shift));
      int default_seltype;
  
