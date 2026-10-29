@@ -20,6 +20,12 @@ Setting: Deny / Ask / Allow, default Deny. Write only, never read.
 
 Details: [patches/0001-osc52-clipboard-write.md](patches/0001-osc52-clipboard-write.md)
 
+### 0002: OSC 52 tests
+
+Tests for 0001, run with `test_terminal`. Optional: drop it to build without them.
+
+Details: [patches/0002-osc52-tests.md](patches/0002-osc52-tests.md)
+
 ## Build
 
 `uv run` installs zig, cmake and ninja (see `pyproject.toml`) into `.venv`.
